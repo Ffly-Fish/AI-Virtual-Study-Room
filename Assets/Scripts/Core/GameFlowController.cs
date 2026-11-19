@@ -3,8 +3,8 @@ using System.Collections;
 using UnityEngine;
 
 /// <summary>
-/// 流程状态：从登录到进入房间单机跑通所需的最小状态集合。
-/// 阶段 2 会补 Migrating / Reconnect 两个支路。
+/// 流程状态：从登录到进入房间、再到房主迁移所需的状态集合。
+/// Migrating 是唯一一个"房间已经没了、但还没回登录"的中间态。
 /// </summary>
 public enum GameState
 {
@@ -30,7 +30,10 @@ public enum GameState
     CameraIntro = 6,
 
     /// <summary>已在房间内，开始判定与计时。</summary>
-    InRoom = 7
+    InRoom = 7,
+
+    /// <summary>房主掉线，正在接管或重新加入房间。</summary>
+    Migrating = 8
 }
 
 /// <summary>
@@ -78,6 +81,18 @@ public class GameFlowController : MonoBehaviour
     /// <summary>最近一次写入角色的专注状态，避免每帧重复写 Animator。</summary>
     private bool _isFocusing;
 
+    /// <summary>迁移协程句柄，防止同一次掉线触发两遍迁移。</summary>
+    private Coroutine _migrationRoutine;
+
+    /// <summary>判定器连续不可用的累计时长（秒），超过阈值就转旁观。</summary>
+    private float _unavailableSeconds;
+
+    /// <summary>本次是否以旁观模式进入（拿不到摄像头时只观察、不计专注）。</summary>
+    private bool _isSpectator;
+
+    /// <summary>判定器连续不可用多少秒后转旁观，避免刚启动那一两帧误判。</summary>
+    private const float SpectatorThresholdSeconds = 3f;
+
     /// <summary>当前状态。</summary>
     public GameState State { get; private set; } = GameState.Boot;
 
@@ -121,6 +136,12 @@ public class GameFlowController : MonoBehaviour
         {
             _context.Session.OnFailed += HandleNetworkFailed;
             _context.Session.OnDisconnected += HandleNetworkDisconnected;
+
+            // 心跳看门狗：比传输层断开检测快 20 秒以上，先到先触发。
+            if (_context.Migration != null)
+            {
+                _context.Migration.OnHostLost += HandleHostLost;
+            }
         }
     }
 
@@ -134,6 +155,11 @@ public class GameFlowController : MonoBehaviour
         {
             _context.Session.OnFailed -= HandleNetworkFailed;
             _context.Session.OnDisconnected -= HandleNetworkDisconnected;
+
+            if (_context.Migration != null)
+            {
+                _context.Migration.OnHostLost -= HandleHostLost;
+            }
         }
     }
 
@@ -168,8 +194,12 @@ public class GameFlowController : MonoBehaviour
         }
 
         _context?.Discovery?.StopHostListener();
+        _context?.Migration?.ResetRoster();
         _localPlayerNetwork = null;
         _seatIndex = 0;
+        _isSpectator = false;
+        _unavailableSeconds = 0f;
+        _migrationRoutine = null;
         ApplyFocusing(false);
         EnterLogin();
     }
@@ -183,6 +213,30 @@ public class GameFlowController : MonoBehaviour
         }
 
         if (_context.Detector == null)
+        {
+            if (!_isSpectator)
+            {
+                MarkSpectator("没有可用的专注判定器，本次以旁观模式进入");
+            }
+
+            return;
+        }
+
+        // 摄像头可能被权限/占用卡住：连续不可用一小段时间就直接转旁观，不再空转推理。
+        if (!_context.Detector.IsAvailable)
+        {
+            _unavailableSeconds += Time.deltaTime;
+            if (_unavailableSeconds >= SpectatorThresholdSeconds && !_isSpectator)
+            {
+                MarkSpectator("未获得摄像头权限，本次以旁观模式进入");
+            }
+
+            return;
+        }
+
+        _unavailableSeconds = 0f;
+
+        if (_isSpectator)
         {
             return;
         }
@@ -258,6 +312,9 @@ public class GameFlowController : MonoBehaviour
     private IEnumerator NetworkSearchRoutine()
     {
         _foundHostAddress = null;
+        _isSpectator = false;
+        _unavailableSeconds = 0f;
+        _context.Migration?.ResetRoster();
         yield return _context.Discovery.Search(
             _searchSeconds,
             address => _foundHostAddress = address,
@@ -349,6 +406,16 @@ public class GameFlowController : MonoBehaviour
 
         _localPlayerNetwork = playerNetwork;
         _seatIndex = playerNetwork.SeatIndex;
+
+        // 没有判定器（例如主动走旁观）时先标记旁观，避免空转采样。
+        if (_context.Detector == null)
+        {
+            MarkSpectator("没有可用的专注判定器，本次以旁观模式进入");
+        }
+        else
+        {
+            playerNetwork.SetSpectator(false);
+        }
         _context?.Login?.Hide();
         _context?.Hud?.Show();
         _context?.Hud?.SetCoins(_context.Wallet != null ? _context.Wallet.Coins : 0);
@@ -381,16 +448,171 @@ public class GameFlowController : MonoBehaviour
         ReturnToLogin();
     }
 
-    /// <summary>掉线：提示并回登录，房间那边由 Netcode 自己清理。</summary>
+    /// <summary>
+    /// 与房间断开：还在房间里说明是房主掉了，先尝试接管或重新加入；
+    /// 其余情况（登录、搜索、刚连上就失败）直接回登录。
+    /// 注意迁移流程自己调 Leave 也会进到这里，用 State 挡掉。
+    /// </summary>
     private void HandleNetworkDisconnected()
     {
-        if (State == GameState.Login)
+        if (State == GameState.Login || State == GameState.Migrating)
         {
             return;
         }
 
-        _context?.Toast?.Show("与房间断开连接");
+        bool wasInRoom = State == GameState.InRoom || State == GameState.CameraIntro || State == GameState.Spawning;
+        if (!wasInRoom || _context?.Session == null)
+        {
+            _context?.Toast?.Show("与房间断开连接");
+            ReturnToLogin();
+            return;
+        }
+
+        BeginMigration(_context.Migration != null && _context.Migration.ShouldTakeOver());
+    }
+
+    /// <summary>
+    /// 房主心跳超时：与 HandleNetworkDisconnected 共用同一套迁移流程，
+    /// 靠 _migrationRoutine 去重，所以两条链路谁先到都不会重复接管。
+    /// </summary>
+    private void HandleHostLost(bool takeOver)
+    {
+        if (State == GameState.Login || State == GameState.Migrating || _migrationRoutine != null)
+        {
+            return;
+        }
+
+        BeginMigration(takeOver);
+    }
+
+    /// <summary>进入迁移流程：迁移期间关掉看门狗，避免自己主动退房又触发一次。</summary>
+    private void BeginMigration(bool takeOver)
+    {
+        if (_migrationRoutine != null)
+        {
+            return;
+        }
+
+        if (_context.Migration != null)
+        {
+            _context.Migration.WatchdogEnabled = false;
+        }
+
+        _migrationRoutine = StartCoroutine(MigrateRoutine(takeOver));
+    }
+
+    /// <summary>房主掉线后的重建：先彻底退房，再按"是否接任"走两条分支。</summary>
+    private IEnumerator MigrateRoutine(bool takeOver)
+    {
+        SetState(GameState.Migrating);
+        _context.Camera?.SkipIntro();
+        _context.Toast?.Show(takeOver ? "房主已离开，正在接管房间…" : "房主已离开，正在重新加入…");
+
+        // 先把本地连接与发现端口收干净，否则新房间抢不到端口。
+        _localPlayerNetwork = null;
+        _context.Session?.Leave();
+        _context.Discovery?.StopHostListener();
+
+        // 等一帧让 Netcode 把连接状态清完，再决定是否重新开监听。
+        yield return new WaitForSecondsRealtime(1f);
+
+        if (takeOver)
+        {
+            yield return TakeOverHostRoutine();
+        }
+        else
+        {
+            yield return RejoinRoutine();
+        }
+
+        _migrationRoutine = null;
+
+        // 迁移结束重新开始计时：新房间里心跳会重新到达，看门狗从零开始。
+        _context.Migration?.ResetWatchdog();
+    }
+
+    /// <summary>接管：抢发现端口 → 开房 → 等角色重新生成（座位靠会话号回到原位）。</summary>
+    private IEnumerator TakeOverHostRoutine()
+    {
+        _context.Migration?.ResetRoster();
+        _hostRegistry = FindObjectOfType<RoomRegistry>();
+
+        // 旧房主刚退出，端口可能还占着一小会儿，重试几次再放弃。
+        bool listening = false;
+        for (int attempt = 0; attempt < 5 && !listening; attempt++)
+        {
+            listening = _context.Discovery != null && _context.Discovery.StartHostListener(GetCachedPlayerCount);
+            if (!listening)
+            {
+                yield return new WaitForSecondsRealtime(0.5f);
+            }
+        }
+
+        if (!listening || !_context.Session.StartHost())
+        {
+            // 抢不到端口说明已经有别人接管了，退回到"重新加入"这条路。
+            yield return RejoinRoutine();
+            yield break;
+        }
+
+        _context.Toast?.Show("你已成为新房主");
+        yield return WaitLocalPlayerRoutine(10f);
+
+        if (_localPlayerNetwork == null)
+        {
+            _context.Toast?.Show("接管房间失败，请重新进入");
+            ReturnToLogin();
+        }
+    }
+
+    /// <summary>非接任者：重新广播找新房主并加入，最多试三次。</summary>
+    private IEnumerator RejoinRoutine()
+    {
+        for (int attempt = 1; attempt <= 3; attempt++)
+        {
+            _foundHostAddress = null;
+            if (_context.Discovery != null)
+            {
+                yield return _context.Discovery.Search(
+                    _searchSeconds,
+                    address => _foundHostAddress = address,
+                    () => _foundHostAddress = null);
+            }
+
+            if (!string.IsNullOrEmpty(_foundHostAddress) && _context.Session.JoinRoom(_foundHostAddress))
+            {
+                SetState(GameState.Joining);
+                yield return WaitLocalPlayerRoutine(10f);
+                if (_localPlayerNetwork != null)
+                {
+                    yield break;
+                }
+            }
+
+            yield return new WaitForSecondsRealtime(1f);
+        }
+
+        _context.Toast?.Show("与房间断开连接");
         ReturnToLogin();
+    }
+
+    /// <summary>等本机角色重新生成，超时返回 null。</summary>
+    private IEnumerator WaitLocalPlayerRoutine(float timeoutSeconds)
+    {
+        float deadline = Time.unscaledTime + timeoutSeconds;
+        while (Time.unscaledTime < deadline && _localPlayerNetwork == null)
+        {
+            yield return null;
+        }
+    }
+
+    /// <summary>转为旁观：停掉判定与计时，只保留观察与网络状态同步。</summary>
+    private void MarkSpectator(string message)
+    {
+        _isSpectator = true;
+        _localPlayerNetwork?.SetSpectator(true);
+        ApplyFocusing(false);
+        _context?.Toast?.Show(message);
     }
 
     /// <summary>入座：取最小空闲座位 → 生成角色 → 相机推镜。</summary>

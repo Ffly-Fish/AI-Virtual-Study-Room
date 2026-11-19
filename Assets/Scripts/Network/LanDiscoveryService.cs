@@ -54,9 +54,9 @@ public class LanDiscoveryService : MonoBehaviour
 
         try
         {
-            // ExclusiveAddressUse=false：允许和本机其它进程的 socket 共用端口，读包仍按投递生效。
-            _listener = new UdpClient { EnableBroadcast = true, ExclusiveAddressUse = false };
-            _listener.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            // 独占绑定：同机第二个实例必须在这里失败，才能走"加入已有房间"的分支。
+            // 若允许共用端口，两个实例会同时以为自己是房主，谁也连不上谁。
+            _listener = new UdpClient { EnableBroadcast = true, ExclusiveAddressUse = true };
             _listener.Client.Bind(new IPEndPoint(IPAddress.Any, Port));
         }
         catch (Exception exception)
@@ -67,8 +67,6 @@ public class LanDiscoveryService : MonoBehaviour
         }
 
         _isListening = true;
-        // TODO: 联机验证通过后删除这条临时日志（与 ListenLoop 里的两条一起）。
-        Debug.Log("[LanDiscoveryService] 已开始监听 UDP " + Port, this);
         _listenThread = new Thread(ListenLoop) { IsBackground = true, Name = "LanDiscoveryHost" };
         _listenThread.Start();
         return true;
@@ -221,7 +219,6 @@ public class LanDiscoveryService : MonoBehaviour
                 int count = _playerCountProvider != null ? _playerCountProvider() : 0;
                 byte[] reply = Encoding.UTF8.GetBytes(ReplyMessage + CountSeparator + count);
                 listener.Send(reply, reply.Length, remote);
-                Debug.Log("[LanDiscoveryService] 回执给 " + remote + "，人数 " + count);
             }
             catch (Exception exception)
             {

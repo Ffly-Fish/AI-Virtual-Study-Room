@@ -2,8 +2,8 @@ using UnityEngine;
 
 /// <summary>
 /// 调试用的专注判定器：按住空格表示"看着屏幕"，松手表示"走神"。
-/// 真实摄像头判定（Barracuda 人脸模型）尚未接入，先用它把
-/// "判定 → 动作 A/B → 金币"整条链路跑通；接入模型后由 GameBootstrap 换成真判定器。
+/// 正常情况下由 BarracudaFaceDetector 接管（GameBootstrap 优先用真模型），
+/// 只有在没有配置模型或摄像头不可用时才退回这里，方便在编辑器里验证动作与金币链路。
 /// </summary>
 public class SimulatedFocusDetector : MonoBehaviour, IFocusDetector
 {
@@ -19,12 +19,6 @@ public class SimulatedFocusDetector : MonoBehaviour, IFocusDetector
     /// <summary>当前是否处于"人在屏幕前"的模拟状态。</summary>
     private bool _hasFace;
 
-    /// <summary>
-    /// 临时诊断开关：非空时忽略键盘输入、直接返回该值，便于无人值守验证"专注 → 坐下 → 金币"链路。
-    /// TODO: 接入真实人脸模型后删除此开关。
-    /// </summary>
-    public static bool? ForceOverride;
-
     /// <summary>调试判定器永远可用，不依赖硬件。</summary>
     public bool IsAvailable => true;
 
@@ -37,17 +31,6 @@ public class SimulatedFocusDetector : MonoBehaviour, IFocusDetector
     /// <summary>采样：按键按下或勾选了默认专注时视为脸在屏幕前，偏航角固定为 0（正对屏幕）。</summary>
     public FocusSample Detect()
     {
-        if (ForceOverride.HasValue)
-        {
-            return new FocusSample
-            {
-                IsFacePresent = ForceOverride.Value,
-                YawDegrees = 0f,
-                Confidence = ForceOverride.Value ? 1f : 0f,
-                Timestamp = Time.unscaledTime,
-            };
-        }
-
         bool pressed = Input.GetKey(_focusKey);
         bool facePresent = _startFocusing || pressed;
 

@@ -46,6 +46,9 @@ public class GameContext
     /// <summary>局域网房间发现，单机模式下为空。</summary>
     public LanDiscoveryService Discovery { get; set; }
 
+    /// <summary>房主迁移花名册，单机模式下为空。</summary>
+    public HostMigrationService Migration { get; set; }
+
     /// <summary>专注判定器（按键模拟器或摄像头实现）。</summary>
     public IFocusDetector Detector { get; set; }
 }

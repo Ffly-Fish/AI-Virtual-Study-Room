@@ -72,6 +72,9 @@ public class GameBootstrap : MonoBehaviour
         NetworkSessionService session = BuildSessionService();
         LanDiscoveryService discovery = session != null ? GetOrAddComponent<LanDiscoveryService>() : null;
 
+        // 花名册挂在 NetworkManager 对象上：迁移后它仍然是同一条记录来源。
+        HostMigrationService migration = session != null ? GetOrAddComponent<HostMigrationService>() : null;
+
         InventoryStore inventory = new InventoryStore(_skinCatalog);
         ShopService shopService = new ShopService(_skinCatalog, wallet, inventory);
 
@@ -95,6 +98,7 @@ public class GameBootstrap : MonoBehaviour
             Detector = ResolveDetector(),
             Session = session,
             Discovery = discovery,
+            Migration = migration,
         };
 
         context.Login.Build(PrefsStore.LoadPlayerName());
