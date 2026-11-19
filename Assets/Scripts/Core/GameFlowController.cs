@@ -20,14 +20,17 @@ public enum GameState
     /// <summary>作为房主创建房间。</summary>
     Hosting = 3,
 
+    /// <summary>已找到房间，正在连进去。</summary>
+    Joining = 4,
+
     /// <summary>在座位上生成角色。</summary>
-    Spawning = 4,
+    Spawning = 5,
 
     /// <summary>相机推镜过场。</summary>
-    CameraIntro = 5,
+    CameraIntro = 6,
 
     /// <summary>已在房间内，开始判定与计时。</summary>
-    InRoom = 6
+    InRoom = 7
 }
 
 /// <summary>
@@ -62,6 +65,15 @@ public class GameFlowController : MonoBehaviour
 
     /// <summary>搜索协程句柄，退出时用于打断。</summary>
     private Coroutine _searchRoutine;
+
+    /// <summary>本机玩家的网络身份，联机时所有同步都走它；单机为空。</summary>
+    private PlayerNetwork _localPlayerNetwork;
+
+    /// <summary>局域网探测到的房主地址，空表示没找到房间。</summary>
+    private string _foundHostAddress;
+
+    /// <summary>房主模式下缓存下来的座位分配器，供后台发现线程读取人数快照。</summary>
+    private RoomRegistry _hostRegistry;
 
     /// <summary>最近一次写入角色的专注状态，避免每帧重复写 Animator。</summary>
     private bool _isFocusing;
@@ -101,6 +113,28 @@ public class GameFlowController : MonoBehaviour
         {
             _context.Camera.OnIntroFinished += HandleIntroFinished;
         }
+
+        PlayerNetwork.OnLocalPlayerReady += HandleLocalPlayerReady;
+        PlayerNetwork.OnLocalPlayerGone += HandleLocalPlayerGone;
+
+        if (_context.Session != null)
+        {
+            _context.Session.OnFailed += HandleNetworkFailed;
+            _context.Session.OnDisconnected += HandleNetworkDisconnected;
+        }
+    }
+
+    /// <summary>退场时取消静态事件订阅，避免场景重载后重复回调。</summary>
+    private void OnDestroy()
+    {
+        PlayerNetwork.OnLocalPlayerReady -= HandleLocalPlayerReady;
+        PlayerNetwork.OnLocalPlayerGone -= HandleLocalPlayerGone;
+
+        if (_context?.Session != null)
+        {
+            _context.Session.OnFailed -= HandleNetworkFailed;
+            _context.Session.OnDisconnected -= HandleNetworkDisconnected;
+        }
     }
 
     /// <summary>进入登录状态，界面切到登录面板。</summary>
@@ -127,6 +161,14 @@ public class GameFlowController : MonoBehaviour
 
         _context?.Camera?.SkipIntro();
         _context?.Spawner?.DespawnLocalPlayer();
+
+        if (_context?.Session != null && _context.Session.IsRunning)
+        {
+            _context.Session.Leave();
+        }
+
+        _context?.Discovery?.StopHostListener();
+        _localPlayerNetwork = null;
         _seatIndex = 0;
         ApplyFocusing(false);
         EnterLogin();
@@ -194,10 +236,11 @@ public class GameFlowController : MonoBehaviour
             StopCoroutine(_searchRoutine);
         }
 
-        _searchRoutine = StartCoroutine(SearchRoutine());
+        bool networked = _context != null && _context.Session != null && _context.Discovery != null;
+        _searchRoutine = StartCoroutine(networked ? NetworkSearchRoutine() : SearchRoutine());
     }
 
-    /// <summary>模拟搜索：等待固定时长后自建房间（阶段 1 单机；阶段 2 改为监听局域网应答）。</summary>
+    /// <summary>单机搜索：等待固定时长后直接入座（没有网络组件时的兜底）。</summary>
     private IEnumerator SearchRoutine()
     {
         yield return new WaitForSeconds(_searchSeconds);
@@ -206,6 +249,148 @@ public class GameFlowController : MonoBehaviour
         SetState(GameState.Hosting);
         _context.Login?.Hide();
         EnterRoom();
+    }
+
+    /// <summary>
+    /// 联机搜索：先广播 1.5 秒找房间，找到就加入，找不到就自己开房并开始回应探测。
+    /// 全局域网只允许一个房间，所以"找不到"就等于"我是房主"。
+    /// </summary>
+    private IEnumerator NetworkSearchRoutine()
+    {
+        _foundHostAddress = null;
+        yield return _context.Discovery.Search(
+            _searchSeconds,
+            address => _foundHostAddress = address,
+            () => _foundHostAddress = null);
+
+        if (!string.IsNullOrEmpty(_foundHostAddress))
+        {
+            SetState(GameState.Joining);
+            _context.Login?.SetHint("找到房间，正在加入…", false);
+            if (!_context.Session.JoinRoom(_foundHostAddress))
+            {
+                ReturnToLogin();
+                yield break;
+            }
+        }
+        else
+        {
+            SetState(GameState.Hosting);
+            _context.Login?.SetHint("没有找到房间，正在创建…", false);
+
+            // 先抢局域网发现端口：抢不到说明本机已经有一个房主实例（重复开两个客户端时）。
+            // 这时不能再开第二个房，应该重新搜索并加入已有的那个房间。
+            _hostRegistry = FindObjectOfType<RoomRegistry>();
+            if (!_context.Discovery.StartHostListener(GetCachedPlayerCount))
+            {
+                _context.Login?.SetHint("本机已有房间，正在加入…", false);
+                yield return _context.Discovery.Search(
+                    _searchSeconds,
+                    address => _foundHostAddress = address,
+                    () => _foundHostAddress = null);
+
+                if (string.IsNullOrEmpty(_foundHostAddress) || !_context.Session.JoinRoom(_foundHostAddress))
+                {
+                    _context.Toast?.Show("本机房间端口被占用，请只保留一个实例");
+                    ReturnToLogin();
+                    yield break;
+                }
+
+                SetState(GameState.Joining);
+            }
+            else if (!_context.Session.StartHost())
+            {
+                _context.Discovery.StopHostListener();
+                ReturnToLogin();
+                yield break;
+            }
+        }
+
+        _searchRoutine = null;
+
+        // 角色由服务端生成、座位分配好后通过网络变量同步回来，这里等它触发 OnLocalPlayerReady。
+        float deadline = Time.unscaledTime + 10f;
+        while (Time.unscaledTime < deadline && _localPlayerNetwork == null)
+        {
+            yield return null;
+        }
+
+        if (_localPlayerNetwork == null)
+        {
+            _context.Toast?.Show("进房超时，请重试");
+            _context.Session.Leave();
+            ReturnToLogin();
+        }
+    }
+
+    /// <summary>当前房间人数，用于回执里告诉别人房间还剩几个位置。</summary>
+    private int CountRoomPlayers()
+    {
+        RoomRegistry registry = FindObjectOfType<RoomRegistry>();
+        return registry != null ? registry.PlayerCount : 1;
+    }
+
+    /// <summary>
+    /// 供局域网发现的后台线程回调：只读一个普通 int 快照。
+    /// 后台线程里不能碰任何 Unity 场景 API（FindObjectOfType 会抛"can only be called from the main thread"）。
+    /// </summary>
+    private int GetCachedPlayerCount()
+    {
+        return _hostRegistry != null ? _hostRegistry.PlayerCountSnapshot : 1;
+    }
+
+    /// <summary>本机角色就位：隐藏登录、开 HUD、飞相机。</summary>
+    private void HandleLocalPlayerReady(PlayerNetwork playerNetwork)
+    {
+        if (playerNetwork == null || State == GameState.InRoom)
+        {
+            return;
+        }
+
+        _localPlayerNetwork = playerNetwork;
+        _seatIndex = playerNetwork.SeatIndex;
+        _context?.Login?.Hide();
+        _context?.Hud?.Show();
+        _context?.Hud?.SetCoins(_context.Wallet != null ? _context.Wallet.Coins : 0);
+        _context?.Hud?.SetProgress(_focusTracker.Progress01);
+        ApplyFocusing(false);
+        SetState(GameState.CameraIntro);
+
+        SeatMarker seat = _context?.Seats != null ? _context.Seats.GetMarker(playerNetwork.SeatIndex) : null;
+        if (seat != null)
+        {
+            _context.Camera?.FlyToSeat(seat);
+        }
+        else
+        {
+            HandleIntroFinished();
+        }
+    }
+
+    /// <summary>本机角色消失（退房或掉线）：回到登录。</summary>
+    private void HandleLocalPlayerGone()
+    {
+        _localPlayerNetwork = null;
+    }
+
+    /// <summary>联机失败：提示并回登录。</summary>
+    private void HandleNetworkFailed(string reason)
+    {
+        _context?.Toast?.Show(reason);
+        _context?.Login?.SetInteractable(true);
+        ReturnToLogin();
+    }
+
+    /// <summary>掉线：提示并回登录，房间那边由 Netcode 自己清理。</summary>
+    private void HandleNetworkDisconnected()
+    {
+        if (State == GameState.Login)
+        {
+            return;
+        }
+
+        _context?.Toast?.Show("与房间断开连接");
+        ReturnToLogin();
     }
 
     /// <summary>入座：取最小空闲座位 → 生成角色 → 相机推镜。</summary>
@@ -280,6 +465,14 @@ public class GameFlowController : MonoBehaviour
     private void ApplyFocusing(bool isFocusing)
     {
         _isFocusing = isFocusing;
+
+        if (_localPlayerNetwork != null)
+        {
+            // 联机时专注状态要同步给所有人，本人这里也由网络变量回调统一驱动动画。
+            _localPlayerNetwork.SetFocusing(isFocusing);
+            _context?.Hud?.SetFocusing(isFocusing);
+            return;
+        }
 
         GameObject player = _context?.Spawner?.LocalPlayer;
         if (player != null)

@@ -1,6 +1,8 @@
 using System.IO;
 using System.Linq;
 using TMPro;
+using Unity.Netcode;
+using Unity.Netcode.Transports.UTP;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -37,6 +39,12 @@ public static class StudyRoomSetupTool
     /// <summary>入口对象名。</summary>
     private const string BootstrapName = "GameBootstrap";
 
+    /// <summary>玩家网络预制体路径；NetworkManager 用它实例化每个玩家的角色。</summary>
+    private const string PlayerPrefabPath = "Assets/Prefabs/PlayerNetwork.prefab";
+
+    /// <summary>网络管理器对象名；整场景只有一个。</summary>
+    private const string NetworkManagerName = "NetworkManager";
+
     /// <summary>5 套皮肤的配置：编号、显示名、资源路径（第 0 套是默认皮肤，默认已解锁）。</summary>
     private static readonly (byte Id, string DisplayName, string ModelPath)[] SkinTable =
     {
@@ -67,6 +75,7 @@ public static class StudyRoomSetupTool
         TagMainCamera();
         CameraDirector director = EnsureCameraDirector();
         EnsureBootstrap(catalog, registry, director);
+        EnsureNetworkManager(EnsurePlayerNetworkPrefab(catalog, registry));
         HideLegacyCanvas();
         HideLegacyActors();
 
@@ -74,7 +83,98 @@ public static class StudyRoomSetupTool
         EditorSceneManager.SaveScene(EditorSceneManager.GetActiveScene());
         AssetDatabase.SaveAssets();
 
-        Debug.Log("[StudyRoomSetupTool] SETUP DONE：皮肤总表、4 个座位、GameBootstrap 与相机已就绪。");
+        Debug.Log("[StudyRoomSetupTool] SETUP DONE：皮肤总表、4 个座位、GameBootstrap、相机与联机组件已就绪。");
+    }
+
+    /// <summary>
+    /// 生成玩家网络预制体：角色模型、名字牌、动作驱动都在运行时按皮肤与状态填充，
+    /// 预制体只固定组件组合与共享引用，所以 5 套皮肤可以共用一个网络对象。
+    /// </summary>
+    private static GameObject EnsurePlayerNetworkPrefab(SkinCatalog catalog, SeatRegistry registry)
+    {
+        if (!AssetDatabase.IsValidFolder("Assets/Prefabs"))
+        {
+            AssetDatabase.CreateFolder("Assets", "Prefabs");
+        }
+
+        RuntimeAnimatorController animator = AssetDatabase.LoadAssetAtPath<RuntimeAnimatorController>(AnimatorPath);
+        GameObject root = new GameObject("PlayerNetwork");
+
+        try
+        {
+            GameObject skinRoot = new GameObject("SkinRoot");
+            skinRoot.transform.SetParent(root.transform, false);
+
+            SkinVisualBinder binder = root.AddComponent<SkinVisualBinder>();
+            root.AddComponent<PlayerNameTag>();
+            root.AddComponent<PlayerAnimatorDriver>();
+            root.AddComponent<NetworkObject>();
+            PlayerNetwork playerNetwork = root.AddComponent<PlayerNetwork>();
+
+            SerializedObject binderSerialized = new SerializedObject(binder);
+            binderSerialized.FindProperty("_skinRoot").objectReferenceValue = skinRoot.transform;
+            binderSerialized.FindProperty("_sharedController").objectReferenceValue = animator;
+            binderSerialized.ApplyModifiedPropertiesWithoutUndo();
+
+            SerializedObject playerSerialized = new SerializedObject(playerNetwork);
+            playerSerialized.FindProperty("_skinCatalog").objectReferenceValue = catalog;
+            playerSerialized.FindProperty("_animatorController").objectReferenceValue = animator;
+            playerSerialized.FindProperty("_seatRegistry").objectReferenceValue = registry;
+            playerSerialized.ApplyModifiedPropertiesWithoutUndo();
+
+            GameObject prefab = PrefabUtility.SaveAsPrefabAsset(root, PlayerPrefabPath, out bool saved);
+            if (!saved || prefab == null)
+            {
+                Debug.LogError($"[StudyRoomSetupTool] 玩家网络预制体保存失败：{PlayerPrefabPath}");
+                return null;
+            }
+
+            return prefab;
+        }
+        finally
+        {
+            Object.DestroyImmediate(root);
+        }
+    }
+
+    /// <summary>
+    /// 场景里放一个 NetworkManager 并接好传输层、玩家预制体与座位分配器。
+    /// 重复执行时只更新引用，不会重复添加组件。
+    /// </summary>
+    private static void EnsureNetworkManager(GameObject playerPrefab)
+    {
+        GameObject managerObject = GameObject.Find(NetworkManagerName);
+        if (managerObject == null)
+        {
+            managerObject = new GameObject(NetworkManagerName);
+        }
+
+        NetworkManager manager = managerObject.GetComponent<NetworkManager>();
+        if (manager == null)
+        {
+            manager = managerObject.AddComponent<NetworkManager>();
+        }
+
+        UnityTransport transport = managerObject.GetComponent<UnityTransport>();
+        if (transport == null)
+        {
+            transport = managerObject.AddComponent<UnityTransport>();
+        }
+
+        if (managerObject.GetComponent<RoomRegistry>() == null)
+        {
+            managerObject.AddComponent<RoomRegistry>();
+        }
+
+        SerializedObject serialized = new SerializedObject(manager);
+        serialized.FindProperty("NetworkConfig.NetworkTransport").objectReferenceValue = transport;
+        serialized.FindProperty("NetworkConfig.PlayerPrefab").objectReferenceValue = playerPrefab;
+        serialized.ApplyModifiedPropertiesWithoutUndo();
+
+        if (playerPrefab == null)
+        {
+            Debug.LogWarning("[StudyRoomSetupTool] 玩家网络预制体为空，联机时不会生成角色。");
+        }
     }
 
     /// <summary>确保皮肤总表资产存在并写满 5 套皮肤；已存在则只补缺失项。</summary>
@@ -189,10 +289,15 @@ public static class StudyRoomSetupTool
             // 相机：放到桌子对面（座位正前方）4.6 米、离地 3.0 米的斜上方，并向侧向偏移 1.6 米避开桌面花瓶。
             // 本作房间是约 2 倍尺度（桌面高 1.38 米、角色身高 3.4 米），座位贴着桌子、背后就是墙，
             // 因此只能从桌对侧回看角色——这样既能看到角色全身与桌面，也能看到同桌的其他玩家。
+            // 注意：靠墙那两排座位"桌子对面"会穿到墙外，所以最后要把机位夹回房间内部。
             Vector3 forwardDirection = seatRotation * Vector3.forward;
             Vector3 sideDirection = seatRotation * Vector3.right;
-            Vector3 cameraPosition = seatPosition + forwardDirection * 4.6f + Vector3.up * 3.0f + sideDirection * 1.6f;
-            Vector3 lookTarget = seatPosition + Vector3.up * 1.75f;
+            // 长桌只有 2 米宽，"正前方 4.6 米"会正好落到对面座位的玩家身上，
+            // 所以改成更近、更高、更偏侧的斜俯视：既能拍到角色上半身与桌面，又不会钻进别人怀里。
+            float lateralSign = indexOnSide == 0 ? 1f : -1f;
+            Vector3 cameraPosition = seatPosition + forwardDirection * 2.8f + Vector3.up * 3.4f + sideDirection * (2.2f * lateralSign);
+            cameraPosition = ClampInsideRoom(cameraPosition, floorRenderer);
+            Vector3 lookTarget = seatPosition + Vector3.up * 2.0f;
             cameraPoint.transform.SetPositionAndRotation(cameraPosition, Quaternion.LookRotation(lookTarget - cameraPosition));
 
             SeatMarker marker = seatObject.AddComponent<SeatMarker>();
@@ -213,6 +318,25 @@ public static class StudyRoomSetupTool
 
         registrySerialized.ApplyModifiedPropertiesWithoutUndo();
         return registry;
+    }
+
+    /// <summary>
+    /// 把机位夹到地板包围盒内部（留 0.6 米边距）。
+    /// 座位在桌子两侧时，"正前方 4.6 米"很容易落到墙外，镜头会拍成一片墙皮。
+    /// 没有地板时原样返回，交给用户手动调整。
+    /// </summary>
+    private static Vector3 ClampInsideRoom(Vector3 position, Renderer floorRenderer)
+    {
+        if (floorRenderer == null)
+        {
+            return position;
+        }
+
+        const float margin = 0.6f;
+        Bounds room = floorRenderer.bounds;
+        position.x = Mathf.Clamp(position.x, room.min.x + margin, room.max.x - margin);
+        position.z = Mathf.Clamp(position.z, room.min.z + margin, room.max.z - margin);
+        return position;
     }
 
     /// <summary>按名字关键字找场景里第一个渲染器（用于量取桌子与地板的包围盒）。</summary>

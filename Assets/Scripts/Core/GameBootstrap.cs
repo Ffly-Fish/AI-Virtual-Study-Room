@@ -1,6 +1,8 @@
 using TMPro;
 using Unity.Barracuda;
 using UnityEngine;
+using Unity.Netcode;
+using Unity.Netcode.Transports.UTP;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
 
@@ -67,6 +69,9 @@ public class GameBootstrap : MonoBehaviour
         PlayerSpawner spawner = GetOrAddComponent<PlayerSpawner>();
         GameFlowController flow = ResolveFlowController();
 
+        NetworkSessionService session = BuildSessionService();
+        LanDiscoveryService discovery = session != null ? GetOrAddComponent<LanDiscoveryService>() : null;
+
         InventoryStore inventory = new InventoryStore(_skinCatalog);
         ShopService shopService = new ShopService(_skinCatalog, wallet, inventory);
 
@@ -88,6 +93,8 @@ public class GameBootstrap : MonoBehaviour
             Spawner = spawner,
             Camera = cameraDirector,
             Detector = ResolveDetector(),
+            Session = session,
+            Discovery = discovery,
         };
 
         context.Login.Build(PrefsStore.LoadPlayerName());
@@ -261,6 +268,30 @@ public class GameBootstrap : MonoBehaviour
     }
 
     /// <summary>取组件，没有就添加；用于把服务挂在入口对象上，省去场景接线。</summary>
+    /// <summary>
+    /// 装配联机会话。场景里没有 NetworkManager 时返回空，流程层会自动退回单机模式，
+    /// 这样只打开 StudyScene 直接 Play 依然能玩。
+    /// </summary>
+    private NetworkSessionService BuildSessionService()
+    {
+        NetworkManager manager = NetworkManager.Singleton;
+        if (manager == null)
+        {
+            Debug.LogWarning("[GameBootstrap] 场景里没有 NetworkManager，本次以单机模式运行（不会联机）。");
+            return null;
+        }
+
+        UnityTransport transport = manager.GetComponent<UnityTransport>();
+        if (transport == null)
+        {
+            transport = manager.gameObject.AddComponent<UnityTransport>();
+        }
+
+        NetworkSessionService session = GetOrAddComponent<NetworkSessionService>();
+        session.Initialize(manager, transport);
+        return session;
+    }
+
     private T GetOrAddComponent<T>() where T : Component
     {
         T component = GetComponent<T>();
