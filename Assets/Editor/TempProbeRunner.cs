@@ -14,6 +14,9 @@ public static class TempProbeRunner
     /// <summary>场景搭建标记文件（StudyRoomSetupAutoRunner 也监听它）。</summary>
     private const string SetupMarker = "Assets/Editor/.studyroom_setup_request";
 
+    /// <summary>模型探针标记文件。</summary>
+    private const string ModelMarker = "Assets/Editor/.model_probe_request";
+
     /// <summary>编辑器加载后延迟执行。</summary>
     static TempProbeRunner()
     {
@@ -36,10 +39,23 @@ public static class TempProbeRunner
             }
         }
 
+        if (File.Exists(ModelMarker))
+        {
+            File.Delete(ModelMarker);
+            try
+            {
+                TempModelProbe.Run();
+            }
+            catch (System.Exception exception)
+            {
+                Debug.LogError("MODELPROBE 执行失败：" + exception);
+            }
+        }
+
         if (File.Exists(SetupMarker))
         {
             Debug.Log("PROBE 场景搭建标记存在，交给 StudyRoomSetupAutoRunner 处理");
         }
     }
 }
-// touch 1795096691207
+// touch 1795097577171

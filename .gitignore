@@ -40,3 +40,6 @@
 *.app
 sysinfo.txt
 crashlytics-build.properties
+
+# TODO: 某些脚本把未展开的 %SystemDrive% 变量当目录名，误生成的缓存目录绝不入库
+%SystemDrive%/

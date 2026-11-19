@@ -23,6 +23,9 @@ public static class StudyRoomSetupTool
     private const string FontPath = "Assets/Front/HONORSansCN SDF Dynamic.asset";
 
     /// <summary>旧字体资产兜底路径：动态补字失败，仅在动态字体缺失时回退。</summary>
+    /// <summary>人脸检测模型路径，找不到时流程会退回按键模拟。</summary>
+    private const string FaceModelPath = "Assets/Models/face_detector.onnx";
+
     private const string LegacyFontPath = "Assets/Front/HONORSansCN-Regular SDF 1.asset";
 
     /// <summary>角色共享动画控制器。</summary>
@@ -258,7 +261,7 @@ public static class StudyRoomSetupTool
         return mainCamera.gameObject.AddComponent<CameraDirector>();
     }
 
-    /// <summary>创建或更新入口对象，并把字体、皮肤表、动画控制器、座位表、相机导演接上。</summary>
+    /// <summary>创建或更新入口对象，并把字体、皮肤表、动画控制器、人脸模型、座位表、相机导演接上。</summary>
     private static void EnsureBootstrap(SkinCatalog catalog, SeatRegistry registry, CameraDirector director)
     {
         GameObject bootstrapObject = GameObject.Find(BootstrapName);
@@ -284,6 +287,8 @@ public static class StudyRoomSetupTool
         serialized.FindProperty("_skinCatalog").objectReferenceValue = catalog;
         serialized.FindProperty("_animatorController").objectReferenceValue =
             AssetDatabase.LoadAssetAtPath<RuntimeAnimatorController>(AnimatorPath);
+        serialized.FindProperty("_faceDetectorModel").objectReferenceValue =
+            AssetDatabase.LoadAssetAtPath<Unity.Barracuda.NNModel>(FaceModelPath);
         serialized.FindProperty("_seatRegistry").objectReferenceValue = registry;
         serialized.FindProperty("_cameraDirector").objectReferenceValue = director;
         serialized.ApplyModifiedPropertiesWithoutUndo();

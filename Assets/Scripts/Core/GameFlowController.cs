@@ -336,6 +336,9 @@ public class GameFlowController : MonoBehaviour
         _context?.Shop?.Hide();
     }
 
+    /// <summary>当前使用的专注判定器（诊断与联机上报都需要读它）。</summary>
+    public IFocusDetector Detector => _context?.Detector;
+
     /// <summary>购买：成功即穿上并提示，失败按原因给出不同文案。</summary>
     private void HandleBuyRequested(byte skinId)
     {

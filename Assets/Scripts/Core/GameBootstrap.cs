@@ -1,4 +1,5 @@
 using TMPro;
+using Unity.Barracuda;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
@@ -25,8 +26,12 @@ public class GameBootstrap : MonoBehaviour
     [Tooltip("所有皮肤模型共用的 Animator Controller（PlayerAnimator.controller）")]
     [SerializeField] private RuntimeAnimatorController _animatorController;
 
-    /// <summary>可选：外部提供的专注判定器，实现 IFocusDetector 即可，留空则用按键模拟器。</summary>
-    [Tooltip("可选的摄像头判定组件（需实现 IFocusDetector），留空则用空格键模拟专注")]
+    /// <summary>人脸检测模型，指定后默认使用摄像头判定。</summary>
+    [Tooltip("人脸检测模型（Assets/Models/face_detector.onnx），指定后默认启用摄像头判定")]
+    [SerializeField] private NNModel _faceDetectorModel;
+
+    /// <summary>可选：外部提供的专注判定器，实现 IFocusDetector 即可，优先级高于模型与模拟器。</summary>
+    [Tooltip("可选的摄像头判定组件（需实现 IFocusDetector），留空则按模型→模拟器的顺序选择")]
     [SerializeField] private MonoBehaviour _focusDetectorSource;
 
     /// <summary>场景里的座位总表，留空会自动查找。</summary>
@@ -211,6 +216,18 @@ public class GameBootstrap : MonoBehaviour
         if (_focusDetectorSource != null)
         {
             Debug.LogWarning("[GameBootstrap] 指定的判定组件没有实现 IFocusDetector，已退回按键模拟。", this);
+        }
+
+        if (_faceDetectorModel != null)
+        {
+            BarracudaFaceDetector cameraDetector = GetComponentInChildren<BarracudaFaceDetector>();
+            if (cameraDetector == null)
+            {
+                cameraDetector = gameObject.AddComponent<BarracudaFaceDetector>();
+            }
+
+            cameraDetector.SetModel(_faceDetectorModel);
+            return cameraDetector;
         }
 
         SimulatedFocusDetector simulated = GetComponentInChildren<SimulatedFocusDetector>();
