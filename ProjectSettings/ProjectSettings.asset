@@ -559,7 +559,7 @@ PlayerSettings:
   enableInternalProfiler: 0
   logObjCUncaughtExceptions: 1
   enableCrashReportAPI: 0
-  cameraUsageDescription: 
+  cameraUsageDescription: 需要用摄像头判断你是否在看屏幕，画面只在本机处理，不会上传。
   locationUsageDescription: 
   microphoneUsageDescription: 
   bluetoothUsageDescription: 

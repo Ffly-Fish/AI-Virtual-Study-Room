@@ -43,3 +43,6 @@ crashlytics-build.properties
 
 # TODO: 某些脚本把未展开的 %SystemDrive% 变量当目录名，误生成的缓存目录绝不入库
 %SystemDrive%/
+
+# 打包产物（本地测试包，不入库）
+/StudyRoomBuild/

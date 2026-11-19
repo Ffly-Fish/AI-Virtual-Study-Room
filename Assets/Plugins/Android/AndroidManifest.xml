@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 安卓自定义主清单：联机要联网与局域网广播，专注判定要摄像头。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.unity3d.player"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 联机：Netcode/UnityTransport 走 UDP，必须有联网权限 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 判断网络是否可用，避免在断网时反复广播 -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- 局域网发现靠 UDP 广播，安卓需要多播锁才能收到回执 -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <!-- 专注判定要开前置摄像头 -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- 摄像头不是必需硬件：没有摄像头的设备仍可旁观，所以 required=false -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.front" android:required="false" />
+
+    <application>
+        <activity android:name="com.unity3d.player.UnityPlayerActivity"
+                  android:theme="@style/UnityThemeSelector"
+                  android:screenOrientation="fullSensor"
+                  android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data android:name="unityplayer.UnityActivity" android:value="true" />
+        </activity>
+    </application>
+</manifest>

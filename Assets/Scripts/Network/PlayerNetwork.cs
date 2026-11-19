@@ -114,7 +114,10 @@ public class PlayerNetwork : NetworkBehaviour
     /// </summary>
     private void Update()
     {
-        if (!IsSpawned || !IsServer || OwnerClientId != NetworkManager.ServerClientId)
+        // NetworkObject 已经存在但变量还没绑定时写值会报"doesn't know its NetworkBehaviour yet"，
+        // 所以这里连 NetworkObject 的生成状态一起判断。
+        if (!IsSpawned || !IsServer || NetworkObject == null || !NetworkObject.IsSpawned
+            || OwnerClientId != NetworkManager.ServerClientId)
         {
             return;
         }
