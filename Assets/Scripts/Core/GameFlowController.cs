@@ -259,6 +259,23 @@ public class GameFlowController : MonoBehaviour
         _context.Hud?.SetProgress(_focusTracker.Progress01);
     }
 
+    /// <summary>
+    /// 替换专注检测器。设备没有可用摄像头、或用户拒绝授权时，外部用恒不可用的实现顶替，
+    /// 流程会自己走旁观分支，不必到处判断 null。
+    /// </summary>
+    /// <param name="detector">新的检测器；传 null 表示彻底关闭采样。</param>
+    public void OverrideFocusDetector(IFocusDetector detector)
+    {
+        if (_context == null)
+        {
+            return;
+        }
+
+        _context.Detector = detector;
+        _unavailableSeconds = 0f;
+        _focusFilter.Reset(false, Time.unscaledTime);
+    }
+
     /// <summary>切后台/息屏时强制按"不专注"处理，符合用户要求。</summary>
     private void OnApplicationPause(bool isPaused)
     {
