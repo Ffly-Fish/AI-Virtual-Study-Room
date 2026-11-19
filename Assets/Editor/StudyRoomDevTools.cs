@@ -17,6 +17,9 @@ public static class StudyRoomDevTools
     /// <summary>退出播放的标记文件。</summary>
     private const string StopMarker = ".dev_stop";
 
+    /// <summary>打包 Windows 版的标记文件：命令行/自动化里无法点菜单时用它触发打包。</summary>
+    private const string BuildWindowsMarker = ".dev_build_windows";
+
     /// <summary>工程根目录（Assets 的上一级）。</summary>
     private static string ProjectRoot => Directory.GetParent(Application.dataPath).FullName;
 
@@ -41,6 +44,13 @@ public static class StudyRoomDevTools
             File.Delete(Path.Combine(ProjectRoot, StopMarker));
             EditorApplication.isPlaying = false;
             Debug.Log("[StudyRoomDevTools] 已退出播放。");
+        }
+
+        if (!EditorApplication.isPlaying && File.Exists(Path.Combine(ProjectRoot, BuildWindowsMarker)))
+        {
+            File.Delete(Path.Combine(ProjectRoot, BuildWindowsMarker));
+            Debug.Log("[StudyRoomDevTools] 收到打包请求，开始打 Windows 版。");
+            StudyRoomBuilder.BuildWindows();
         }
     }
 
@@ -72,3 +82,4 @@ public static class StudyRoomDevTools
         }
     }
 }
+// touch 1795108909070

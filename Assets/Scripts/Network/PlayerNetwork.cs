@@ -234,6 +234,28 @@ public class PlayerNetwork : NetworkBehaviour
         }
     }
 
+    /// <summary>
+    /// 本人请求更换皮肤。换装必须由服务端写 NetworkVariable，
+    /// 否则只有本机换了模型、别人看到的还是旧皮肤（原来的实现就是买了要重进房间才变）。
+    /// </summary>
+    [ServerRpc]
+    private void RequestSkinServerRpc(byte skinId)
+    {
+        _skinId.Value = skinId;
+    }
+
+    /// <summary>本人调用：请求把自己的皮肤改成 skinId，所有客户端随网络变量回调换模型。</summary>
+    /// <param name="skinId">SkinCatalog 中的皮肤编号</param>
+    public void RequestSkin(byte skinId)
+    {
+        if (!IsSpawned || !IsOwner)
+        {
+            return;
+        }
+
+        RequestSkinServerRpc(skinId);
+    }
+
     /// <summary>本人：上报专注状态，其他人靠这个播放动作 A/B。</summary>
     public void SetFocusing(bool isFocusing)
     {

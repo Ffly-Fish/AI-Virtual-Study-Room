@@ -49,6 +49,15 @@ public class GameBootstrap : MonoBehaviour
     [Tooltip("流程控制器，留空自动创建")]
     [SerializeField] private GameFlowController _flowController;
 
+    /// <summary>背景音乐在 AudioManager 音频列表里登记的名称。</summary>
+    private const string BackgroundMusicName = "背景音乐";
+
+    /// <summary>背景音乐音量，0~1；0.5 左右不盖过音效又不至于听不见。</summary>
+    [Header("音频")]
+    [Tooltip("背景音乐音量（0~1）：进入游戏后循环播放，调低可避免盖住金币音效")]
+    [Range(0f, 1f)]
+    [SerializeField] private float _bgmVolume = 0.5f;
+
     /// <summary>运行时构建的角色模板（非场景对象，仅用于 Instantiate）。</summary>
     private GameObject _playerTemplate;
 
@@ -112,6 +121,23 @@ public class GameBootstrap : MonoBehaviour
 
         flow.Initialize(context);
         flow.EnterLogin();
+    }
+
+    /// <summary>
+    /// 进入游戏后立刻开始循环背景音乐。
+    /// 放在 Start 而不是 Awake，是因为 AudioManager 挂在场里的另一个对象上，
+    /// 它的 Awake 可能晚于本组件的 Awake，过早访问单例会拿到空值。
+    /// </summary>
+    private void Start()
+    {
+        AudioManager audio = AudioManager.Instance != null ? AudioManager.Instance : FindObjectOfType<AudioManager>();
+        if (audio == null)
+        {
+            Debug.LogWarning("[GameBootstrap] 场景里没有 AudioManager，背景音乐不会播放。", this);
+            return;
+        }
+
+        audio.PlayBackgroundMusic(BackgroundMusicName, _bgmVolume);
     }
 
     /// <summary>没有 EventSystem 时创建一个，否则按钮点不动。</summary>

@@ -821,17 +821,34 @@ public class GameFlowController : MonoBehaviour
         _context.Hud?.SetCoins(coins);
     }
 
-    /// <summary>换装后重新绑定模型，并把当前专注状态补写一次，避免新模型站着不动。</summary>
+    /// <summary>
+    /// 换装后统一刷新外观。
+    /// 联机时只发请求：服务端写 SkinId 网络变量，本人和别人都靠同一个回调换模型，
+    /// 这样"点了穿戴立刻生效"且所有人看到的一致；单机（或还没生成网络角色）时直接本地换。
+    /// </summary>
     private void RefreshPlayerSkin()
     {
-        GameObject player = _context?.Spawner?.LocalPlayer;
+        if (_context?.Inventory == null)
+        {
+            return;
+        }
+
+        byte equippedId = (byte)_context.Inventory.EquippedId;
+
+        if (_localPlayerNetwork != null)
+        {
+            _localPlayerNetwork.RequestSkin(equippedId);
+            return;
+        }
+
+        GameObject player = _context.Spawner?.LocalPlayer;
         if (player == null)
         {
             return;
         }
 
         SkinVisualBinder binder = player.GetComponent<SkinVisualBinder>();
-        SkinDefinition skin = _context.Catalog != null ? _context.Catalog.Get((byte)_context.Inventory.EquippedId) : null;
+        SkinDefinition skin = _context.Catalog != null ? _context.Catalog.Get(equippedId) : null;
         binder?.Bind(skin);
         ApplyFocusing(_isFocusing);
     }

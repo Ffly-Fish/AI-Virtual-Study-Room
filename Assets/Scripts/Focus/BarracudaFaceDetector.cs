@@ -31,9 +31,9 @@ public class BarracudaFaceDetector : MonoBehaviour, IFocusDetector
     [SerializeField] private NNModel _model;
 
     [Header("检测参数")]
-    [Tooltip("判定为“画面里有人脸”的最低置信度，太低会把背景误判成人脸")]
-    [Range(0.5f, 0.99f)]
-    [SerializeField] private float _scoreThreshold = 0.85f;
+    [Tooltip("判定为“画面里有人脸”的最低置信度：实测正脸照片得分 0.6~0.73，纯黑画面 0.31，取 0.55 兼顾灵敏度与误判")]
+    [Range(0.3f, 0.9f)]
+    [SerializeField] private float _scoreThreshold = 0.55f;
 
     [Tooltip("每秒检测次数，8 次足够跟上注意力变化，又不至于发热")]
     [Range(1, 15)]
@@ -42,6 +42,14 @@ public class BarracudaFaceDetector : MonoBehaviour, IFocusDetector
     [Header("摄像头")]
     [Tooltip("优先使用的摄像头名包含的关键字，留空则自动选前置摄像头")]
     [SerializeField] private string _preferredCameraKeyword = "";
+
+    [Header("诊断")]
+    [Tooltip("画面全黑超过这个秒数就打印一条警告，用来区分“没人在”和“摄像头被遮挡/没光线”")]
+    [Range(1f, 10f)]
+    [SerializeField] private float _blackFrameWarnSeconds = 3f;
+
+    [Tooltip("打开后每秒打印一次检测置信度，用于现场调阈值，平时关闭避免刷日志")]
+    [SerializeField] private bool _logConfidence = false;
 
     /// <summary>推理后端：CSharpBurst 在 Android 上不需要额外插件，Reference 只用于排查。</summary>
     private IWorker _worker;
@@ -66,6 +74,15 @@ public class BarracudaFaceDetector : MonoBehaviour, IFocusDetector
 
     /// <summary>是否已经把"模型缺失/摄像头不可用"的警告打出来过，避免每帧刷屏。</summary>
     private bool _hasWarned;
+
+    /// <summary>画面全黑时累计的秒数，超过阈值只警告一次。</summary>
+    private float _blackFrameSeconds;
+
+    /// <summary>是否已经提示过画面全黑，避免持续黑屏时反复输出。</summary>
+    private bool _hasWarnedBlackFrame;
+
+    /// <summary>上一次打印置信度的时间，配合 _logConfidence 使用。</summary>
+    private float _lastConfidenceLogTime;
 
     /// <summary>摄像头与模型都可用时才认为判定可用；不可用时流程应转入旁观模式。</summary>
     public bool IsAvailable => _isReady;
@@ -255,7 +272,8 @@ public class BarracudaFaceDetector : MonoBehaviour, IFocusDetector
 
         try
         {
-            FillInputBuffer();
+            float brightness = FillInputBuffer();
+            TrackBlackFrames(brightness);
 
             using (Tensor input = new Tensor(1, InputHeight, InputWidth, InputChannels, _inputBuffer))
             {
@@ -269,6 +287,7 @@ public class BarracudaFaceDetector : MonoBehaviour, IFocusDetector
 
                 float best = BestFaceConfidence(scores);
                 bool hasFace = best >= _scoreThreshold;
+                LogConfidence(best, hasFace);
                 return new FocusSample
                 {
                     IsFacePresent = hasFace,
@@ -310,8 +329,12 @@ public class BarracudaFaceDetector : MonoBehaviour, IFocusDetector
         return best;
     }
 
-    /// <summary>把摄像头画面按最近邻缩放到模型输入尺寸并归一化。</summary>
-    private void FillInputBuffer()
+    /// <summary>
+    /// 把摄像头画面按最近邻缩放到模型输入尺寸并归一化，返回这一帧的平均亮度（0~255）。
+    /// 通道顺序用 BGR：UltraFace 官方预处理是 OpenCV 读图（BGR），
+    /// 实测同一张正脸照片按 BGR 输入比 RGB 高 0.05~0.16 的置信度，按 RGB 会漏检。
+    /// </summary>
+    private float FillInputBuffer()
     {
         int sourceWidth = _webcamTexture.width;
         int sourceHeight = _webcamTexture.height;
@@ -323,6 +346,7 @@ public class BarracudaFaceDetector : MonoBehaviour, IFocusDetector
 
         _webcamTexture.GetPixels32(_pixelBuffer);
 
+        float brightnessSum = 0f;
         for (int y = 0; y < InputHeight; y++)
         {
             int sourceY = y * sourceHeight / InputHeight;
@@ -332,11 +356,50 @@ public class BarracudaFaceDetector : MonoBehaviour, IFocusDetector
                 int sourceX = x * sourceWidth / InputWidth;
                 Color32 pixel = _pixelBuffer[sourceY * sourceWidth + sourceX];
                 int index = rowStart + x * InputChannels;
-                _inputBuffer[index] = (pixel.r - NormalizeMean) / NormalizeScale;
+                _inputBuffer[index] = (pixel.b - NormalizeMean) / NormalizeScale;
                 _inputBuffer[index + 1] = (pixel.g - NormalizeMean) / NormalizeScale;
-                _inputBuffer[index + 2] = (pixel.b - NormalizeMean) / NormalizeScale;
+                _inputBuffer[index + 2] = (pixel.r - NormalizeMean) / NormalizeScale;
+                brightnessSum += (pixel.r + pixel.g + pixel.b) / 3f;
             }
         }
+
+        return brightnessSum / (InputWidth * InputHeight);
+    }
+
+    /// <summary>
+    /// 统计连续全黑的时长：摄像头被遮挡、盖子合着或环境全黑时，
+    /// 画面亮度只有个位数，此时判定永远不会返回人脸，需要把原因说出来而不是静默走神。
+    /// </summary>
+    private void TrackBlackFrames(float brightness)
+    {
+        const float blackBrightness = 8f;
+        if (brightness > blackBrightness)
+        {
+            _blackFrameSeconds = 0f;
+            return;
+        }
+
+        _blackFrameSeconds += 1f / Mathf.Max(1, _samplesPerSecond);
+        if (_blackFrameSeconds < _blackFrameWarnSeconds || _hasWarnedBlackFrame)
+        {
+            return;
+        }
+
+        _hasWarnedBlackFrame = true;
+        Debug.LogWarning($"[BarracudaFaceDetector] 摄像头画面全黑（平均亮度 {brightness:F1}/255），判定不会生效。" +
+                         "请检查镜头是否被遮挡（隐私挡片/合盖）、环境是否有光，或换一个摄像头。", this);
+    }
+
+    /// <summary>按需每秒打印一次置信度，方便现场确认阈值是否合适。</summary>
+    private void LogConfidence(float confidence, bool hasFace)
+    {
+        if (!_logConfidence || Time.unscaledTime - _lastConfidenceLogTime < 1f)
+        {
+            return;
+        }
+
+        _lastConfidenceLogTime = Time.unscaledTime;
+        Debug.Log($"[BarracudaFaceDetector] 置信度={confidence:F3} 阈值={_scoreThreshold:F2} 判定={(hasFace ? "专注" : "走神")}", this);
     }
 
     /// <summary>只警告一次，避免设备没有摄像头时每帧刷日志。</summary>

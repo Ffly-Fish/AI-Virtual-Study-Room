@@ -815,7 +815,7 @@ MonoBehaviour:
   ConnectionData:
     Address: 127.0.0.1
     Port: 7777
-    ServerListenAddress: 
+    ServerListenAddress: 127.0.0.1
   DebugSimulator:
     PacketDelayMS: 0
     PacketJitterMS: 0
@@ -1959,6 +1959,7 @@ MonoBehaviour:
   _seatRegistry: {fileID: 1289995132}
   _cameraDirector: {fileID: 1258625742}
   _flowController: {fileID: 0}
+  _bgmVolume: 0.5
 --- !u!4 &1361120671
 Transform:
   m_ObjectHideFlags: 0
